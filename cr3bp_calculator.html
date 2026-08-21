@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Earth-Moon CR3BP Minimum-Thrust Equilibrium Finder</title>
+<script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+<style>
+  :root{--bg:#1e1f22;--panel:#26282b;--accent:#3b82f6;--text:#e6e6e6;--muted:#9aa0a6;--border:#3a3d41;}
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:Segoe UI,Arial,sans-serif;background:var(--bg);color:var(--text);}
+  h1{font-size:18px;padding:12px 16px;margin:0;background:#151618;border-bottom:1px solid var(--border);}
+  .wrap{display:flex;gap:14px;padding:14px;flex-wrap:wrap;}
+  .left{flex:0 0 300px;}
+  .right{flex:1 1 520px;min-width:420px;}
+  fieldset{border:1px solid var(--border);border-radius:6px;margin-bottom:12px;padding:10px 12px;}
+  legend{padding:0 6px;color:var(--accent);font-weight:600;font-size:13px;}
+  .row{display:flex;justify-content:space-between;align-items:center;margin:6px 0;gap:8px;}
+  .row label{font-size:12.5px;color:var(--muted);}
+  .row input{width:120px;background:#111214;border:1px solid var(--border);color:var(--text);padding:4px 6px;border-radius:4px;text-align:right;}
+  button{width:100%;padding:9px;margin:5px 0;background:var(--accent);border:none;border-radius:5px;color:#fff;font-size:13.5px;cursor:pointer;}
+  button:hover{background:#2563eb;}
+  button.secondary{background:#3a3d41;}
+  button.secondary:hover{background:#4b4f54;}
+  pre#output{background:#111214;border:1px solid var(--border);border-radius:6px;padding:10px;font-size:12.5px;min-height:230px;white-space:pre-wrap;}
+  #plotDiv{width:100%;height:520px;background:#111214;border:1px solid var(--border);border-radius:6px;margin-top:12px;}
+  table{width:100%;border-collapse:collapse;font-size:12px;margin-top:12px;}
+  th,td{border:1px solid var(--border);padding:5px 7px;text-align:center;}
+  th{background:#1a1b1d;color:var(--accent);}
+  .hint{color:var(--muted);font-size:11px;margin-top:-4px;}
+</style>
+</head>
+<body>
+<h1>Earth-Moon CR3BP &mdash; Minimum-Thrust Equilibrium ("Artificial Lagrange Point") Finder</h1>
+<div class="wrap">
+  <div class="left">
+    <fieldset>
+      <legend>Orbital Elements</legend>
+      <div class="row"><label>Semi-major Axis (km)</label><input id="sma" value="326400"></div>
+      <div class="row"><label>Eccentricity</label><input id="ecc" value="0.0"></div>
+      <div class="row"><label>Inclination (deg)</label><input id="inc" value="5.0"></div>
+      <div class="row"><label>RAAN (deg)</label><input id="raan" value="0.0"></div>
+      <div class="row"><label>Arg. of Periapsis (deg)</label><input id="argp" value="0.0"></div>
+      <div class="row"><label>True Anomaly (deg)</label><input id="nu" value="0.0"></div>
+    </fieldset>
+    <fieldset>
+      <legend>Spacecraft / Optimizer</legend>
+      <div class="row"><label>Mass (kg)</label><input id="mass" value="500"></div>
+      <div class="row"><label>Max Continuous Thrust (N)</label><input id="maxThrust" value="50"></div>
+      <div class="row"><label>Search Radius (km)</label><input id="searchRadius" value="50000"></div>
+      <div class="row"><label>Optimization Tolerance</label><input id="tol" value="1e-8"></div>
+      <div class="row"><label>Maximum Iterations</label><input id="maxIter" value="600"></div>
+    </fieldset>
+    <button id="runBtn">Run</button>
+    <button id="plotBtn" class="secondary">Plot</button>
+    <button id="exportBtn" class="secondary">Export CSV</button>
+    <button id="validateBtn" class="secondary">Validate (L1&ndash;L5)</button>
+    <div class="hint">Positions are in the Earth&ndash;Moon barycentric rotating frame.</div>
+  </div>
+  <div class="right">
+    <fieldset>
+      <legend>Output Panel</legend>
+      <pre id="output">Enter inputs and click Run.</pre>
+    </fieldset>
+    <div id="plotDiv"></div>
+    <div id="validateWrap"></div>
+  </div>
+</div>
+
+<script>
+/* ---------------- physics.js ---------------- */
+const GM_EARTH = 398600.4418;
+const GM_MOON = 4902.8000;
+const D_EM = 384400.0;
+const MU = GM_MOON / (GM_EARTH + GM_MOON);
+const OMEGA = Math.sqrt((GM_EARTH + GM_MOON) / Math.pow(D_EM, 3));
+const EARTH_POS = [-MU * D_EM, 0, 0];
+const MOON_POS = [(1 - MU) * D_EM, 0, 0];
+const EARTH_RADIUS = 6371.0;
+const MOON_RADIUS = 1737.4;
+
+function sub(a, b) { return [a[0]-b[0], a[1]-b[1], a[2]-b[2]]; }
+function add(a, b) { return [a[0]+b[0], a[1]+b[1], a[2]+b[2]]; }
+function norm(v) { return Math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]); }
+
+function gravityAccel(r, bodyPos, gm) {
+  const d = sub(r, bodyPos);
+  const dist = norm(d);
+  const d3 = dist*dist*dist;
+  return [-gm*d[0]/d3, -gm*d[1]/d3, -gm*d[2]/d3];
+}
+
+function naturalAccel(r) {
+  const ae = gravityAccel(r, EARTH_POS, GM_EARTH);
+  const am = gravityAccel(r, MOON_POS, GM_MOON);
+  const ac = [OMEGA*OMEGA*r[0], OMEGA*OMEGA*r[1], 0];
+  return [ae[0]+am[0]+ac[0], ae[1]+am[1]+ac[1], ae[2]+am[2]+ac[2]];
+}
+
+function distFromEarth(r) { return norm(sub(r, EARTH_POS)); }
+function distFromMoon(r) { return norm(sub(r, MOON_POS)); }
+
+/* ---------------- orbit.js ---------------- */
+function coeToRV(a, e, incDeg, raanDeg, argpDeg, nuDeg, gm=GM_EARTH) {
+  const inc=incDeg*Math.PI/180, raan=raanDeg*Math.PI/180, argp=argpDeg*Math.PI/180, nu=nuDeg*Math.PI/180;
+  const p = a*(1-e*e);
+  const rMag = p/(1+e*Math.cos(nu));
+  const rPF = [rMag*Math.cos(nu), rMag*Math.sin(nu), 0];
+  const vPF = [-Math.sqrt(gm/p)*Math.sin(nu), Math.sqrt(gm/p)*(e+Math.cos(nu)), 0];
+  const cO=Math.cos(raan), sO=Math.sin(raan);
+  const ci=Math.cos(inc), si=Math.sin(inc);
+  const cw=Math.cos(argp), sw=Math.sin(argp);
+  const R=[
+    [cO*cw - sO*sw*ci, -cO*sw - sO*cw*ci, sO*si],
+    [sO*cw + cO*sw*ci, -sO*sw + cO*cw*ci, -cO*si],
+    [sw*si, cw*si, ci]
+  ];
+  const mv=(M,v)=>[M[0][0]*v[0]+M[0][1]*v[1]+M[0][2]*v[2], M[1][0]*v[0]+M[1][1]*v[1]+M[1][2]*v[2], M[2][0]*v[0]+M[2][1]*v[1]+M[2][2]*v[2]];
+  return { r: mv(R,rPF), v: mv(R,vPF) };
+}
+
+function orbitPath(a, e, incDeg, raanDeg, argpDeg, n=200, gm=GM_EARTH) {
+  const pts = [];
+  for (let i=0;i<n;i++) pts.push(coeToRV(a,e,incDeg,raanDeg,argpDeg, 360*i/(n-1), gm).r);
+  return pts;
+}
+
+function eciToRotating(rEci, earthPosRotating) { return add(rEci, earthPosRotating); }
+
+/* ---------------- optimizer.js (derivative-free Nelder-Mead, ball-constrained) ---------------- */
+function projectToBall(r, r0, R) {
+  const d = sub(r, r0);
+  const dn = norm(d);
+  if (dn <= R) return r;
+  const s = R/dn;
+  return [r0[0]+d[0]*s, r0[1]+d[1]*s, r0[2]+d[2]*s];
+}
+
+function nelderMead(f, x0, opts) {
+  const n = x0.length;
+  const alpha=1, gamma=2, rho=0.5, sigma=0.5;
+  const maxIter = opts.maxIter || 500;
+  const tol = opts.tol || 1e-14;
+  const initStep = opts.initStep || 1;
+
+  let simplex = [x0.slice()];
+  for (let i=0;i<n;i++) { const x=x0.slice(); x[i]+=initStep; simplex.push(x); }
+  let fvals = simplex.map(f);
+  let iter = 0, converged = false;
+
+  for (iter=1; iter<=maxIter; iter++) {
+    const idx = fvals.map((v,i)=>i).sort((a,b)=>fvals[a]-fvals[b]);
+    simplex = idx.map(i=>simplex[i]);
+    fvals = idx.map(i=>fvals[i]);
+    if (Math.abs(fvals[n]-fvals[0]) < tol) { converged = true; break; }
+
+    const centroid = new Array(n).fill(0);
+    for (let i=0;i<n;i++) for (let j=0;j<n;j++) centroid[j]+=simplex[i][j];
+    for (let j=0;j<n;j++) centroid[j]/=n;
+
+    const worst = simplex[n];
+    const xr = centroid.map((c,j)=>c+alpha*(c-worst[j]));
+    const fr = f(xr);
+
+    if (fr < fvals[0]) {
+      const xe = centroid.map((c,j)=>c+gamma*(xr[j]-c));
+      const fe = f(xe);
+      if (fe < fr) { simplex[n]=xe; fvals[n]=fe; } else { simplex[n]=xr; fvals[n]=fr; }
+    } else if (fr < fvals[n-1]) {
+      simplex[n]=xr; fvals[n]=fr;
+    } else {
+      const xc = centroid.map((c,j)=>c+rho*(worst[j]-c));
+      const fc = f(xc);
+      if (fc < fvals[n]) { simplex[n]=xc; fvals[n]=fc; }
+      else { for (let i=1;i<=n;i++){ simplex[i]=simplex[0].map((v,j)=>v+sigma*(simplex[i][j]-v)); fvals[i]=f(simplex[i]); } }
+    }
+  }
+  const idx = fvals.map((v,i)=>i).sort((a,b)=>fvals[a]-fvals[b]);
+  return { x: simplex[idx[0]], f: fvals[idx[0]], iterations: iter, converged };
+}
+
+function findMinThrustEquilibrium(r0, mass, R, tol, maxIter, maxThrust) {
+  const objective = (r) => { const a = naturalAccel(projectToBall(r, r0, R)); return a[0]*a[0]+a[1]*a[1]+a[2]*a[2]; };
+  const initStep = Math.max(R*0.1, 10);
+  const res = nelderMead(objective, r0.slice(), { maxIter, tol: tol*tol, initStep });
+  const rSol = projectToBall(res.x, r0, R);
+  const aNat = naturalAccel(rSol);
+  const T = aNat.map(a => -1000*mass*a);
+  const Tmag = norm(T);
+  const residual = norm(aNat.map((a,i) => a + (T[i]/mass)*1e-3));
+  return {
+    position: rSol, thrust: T, thrustMagnitude: Tmag,
+    distanceEarth: distFromEarth(rSol), distanceMoon: distFromMoon(rSol),
+    success: res.converged, iterations: res.iterations, residualMagnitude: residual,
+    withinThrustLimit: Tmag <= maxThrust,
+  };
+}
+
+/* ---------------- validation.js ---------------- */
+function bisectRoot(f, lo, hi, n=20000) {
+  let prevX=lo, prevF=f(lo);
+  for (let i=1;i<=n;i++) {
+    const x = lo + (hi-lo)*i/n;
+    const fx = f(x);
+    if (isFinite(prevF) && isFinite(fx) && prevF*fx < 0) {
+      let a=prevX,b=x,fa=prevF;
+      for (let k=0;k<80;k++) { const m=(a+b)/2, fm=f(m); if (fa*fm<=0) b=m; else { a=m; fa=fm; } }
+      return (a+b)/2;
+    }
+    prevX=x; prevF=fx;
+  }
+  return null;
+}
+
+function knownLagrangePoints() {
+  const ax = (x) => naturalAccel([x,0,0])[0];
+  const xE=EARTH_POS[0], xM=MOON_POS[0], eps=1.0;
+  const xL1 = bisectRoot(ax, xE+eps, xM-eps);
+  const xL2 = bisectRoot(ax, xM+eps, xM+2*D_EM);
+  const xL3 = bisectRoot(ax, xE-2*D_EM, xE-eps);
+  return {
+    L1:[xL1,0,0], L2:[xL2,0,0], L3:[xL3,0,0],
+    L4:[D_EM*(0.5-MU), D_EM*Math.sqrt(3)/2, 0],
+    L5:[D_EM*(0.5-MU), -D_EM*Math.sqrt(3)/2, 0],
+  };
+}
+
+function validateAll(mass=1000.0, searchRadius=5000.0, tol=1e-10, maxIter=400) {
+  const known = knownLagrangePoints();
+  const out = {};
+  for (const name of ["L1","L2","L3","L4","L5"]) {
+    const pos = known[name];
+    const res = findMinThrustEquilibrium(pos, mass, searchRadius, tol, maxIter, 1e12);
+    out[name] = { known: pos, computed: res.position, posError: norm(sub(res.position,pos)), residual: res.residualMagnitude, success: res.success };
+  }
+  return out;
+}
+
+/* ---------------- plots.js (Plotly) ---------------- */
+function sphereMesh(center, radius, n=24) {
+  const x=[], y=[], z=[];
+  for (let i=0;i<=n;i++) {
+    const u = Math.PI*i/n;
+    const xr=[], yr=[], zr=[];
+    for (let j=0;j<=n;j++) {
+      const v = 2*Math.PI*j/n;
+      xr.push(center[0]+radius*Math.sin(u)*Math.cos(v));
+      yr.push(center[1]+radius*Math.sin(u)*Math.sin(v));
+      zr.push(center[2]+radius*Math.cos(u));
+    }
+    x.push(xr); y.push(yr); z.push(zr);
+  }
+  return {x,y,z};
+}
+
+function plotSystem(orbitPts, eqPos, thrustVec) {
+  const earthSph = sphereMesh(EARTH_POS, EARTH_RADIUS);
+  const moonSph = sphereMesh(MOON_POS, MOON_RADIUS);
+
+  const traceEarth = { type:'surface', x:earthSph.x, y:earthSph.y, z:earthSph.z, showscale:false, colorscale:[[0,'royalblue'],[1,'royalblue']], name:'Earth' };
+  const traceMoon = { type:'surface', x:moonSph.x, y:moonSph.y, z:moonSph.z, showscale:false, colorscale:[[0,'dimgray'],[1,'dimgray']], name:'Moon' };
+  const traceOrbit = { type:'scatter3d', mode:'lines', x:orbitPts.map(p=>p[0]), y:orbitPts.map(p=>p[1]), z:orbitPts.map(p=>p[2]), line:{color:'darkorange', width:3}, name:'Input Orbit' };
+  const traceEq = { type:'scatter3d', mode:'markers', x:[eqPos[0]], y:[eqPos[1]], z:[eqPos[2]], marker:{color:'red', size:6}, name:'Equilibrium Point' };
+
+  const tmag = norm(thrustVec);
+  const traces = [traceEarth, traceMoon, traceOrbit, traceEq];
+  if (tmag > 0) {
+    const scale = (D_EM*0.15)/tmag;
+    const tip = [eqPos[0]+thrustVec[0]*scale, eqPos[1]+thrustVec[1]*scale, eqPos[2]+thrustVec[2]*scale];
+    traces.push({ type:'scatter3d', mode:'lines+markers', x:[eqPos[0],tip[0]], y:[eqPos[1],tip[1]], z:[eqPos[2],tip[2]],
+      line:{color:'limegreen', width:6}, marker:{size:[0,4], color:'limegreen'}, name:'Thrust Vector' });
+  }
+
+  const layout = {
+    paper_bgcolor:'#111214', plot_bgcolor:'#111214', font:{color:'#e6e6e6'},
+    scene:{ xaxis:{title:'x [km]', gridcolor:'#333'}, yaxis:{title:'y [km]', gridcolor:'#333'}, zaxis:{title:'z [km]', gridcolor:'#333'},
+      bgcolor:'#111214', aspectmode:'data' },
+    margin:{l:0,r:0,t:20,b:0}, legend:{x:0, y:1},
+  };
+  Plotly.newPlot('plotDiv', traces, layout, {responsive:true});
+}
+
+/* ---------------- gui.js ---------------- */
+function readInputs() {
+  const g = id => document.getElementById(id).value;
+  const inp = {
+    sma: parseFloat(g('sma')), ecc: parseFloat(g('ecc')), inc: parseFloat(g('inc')),
+    raan: parseFloat(g('raan')), argp: parseFloat(g('argp')), nu: parseFloat(g('nu')),
+    mass: parseFloat(g('mass')), maxThrust: parseFloat(g('maxThrust')),
+    searchRadius: parseFloat(g('searchRadius')), tol: parseFloat(g('tol')), maxIter: parseInt(g('maxIter')),
+  };
+  for (const [k,v] of Object.entries(inp)) if (!isFinite(v)) throw new Error('Invalid numeric input: '+k);
+  if (inp.sma<=0) throw new Error('Semi-major axis must be positive.');
+  if (inp.ecc<0 || inp.ecc>=1) throw new Error('Eccentricity must be in [0,1).');
+  if (inp.mass<=0) throw new Error('Mass must be positive.');
+  if (inp.searchRadius<=0) throw new Error('Search radius must be positive.');
+  if (inp.maxIter<=0) throw new Error('Maximum iterations must be positive.');
+  return inp;
+}
+
+let lastRun = null;
+
+function fmt(n, d=6){ return Number(n).toFixed(d); }
+
+function onRun() {
+  let inp;
+  try { inp = readInputs(); } catch(e) { alert(e.message); return; }
+
+  const rv = coeToRV(inp.sma, inp.ecc, inp.inc, inp.raan, inp.argp, inp.nu);
+  const r0 = eciToRotating(rv.r, EARTH_POS);
+  const result = findMinThrustEquilibrium(r0, inp.mass, inp.searchRadius, inp.tol, inp.maxIter, inp.maxThrust);
+
+  lastRun = { inputs: inp, r0, result };
+
+  const p = result.position, t = result.thrust;
+  const lines = [
+    'EQUILIBRIUM RESULT',
+    '='.repeat(60),
+    `Initial orbit position (rotating frame): [${fmt(r0[0],3)}, ${fmt(r0[1],3)}, ${fmt(r0[2],3)}] km`,
+    '',
+    'Equilibrium Position (rotating frame):',
+    `  x = ${fmt(p[0])} km`, `  y = ${fmt(p[1])} km`, `  z = ${fmt(p[2])} km`,
+    '',
+    'Required Thrust:',
+    `  Tx = ${fmt(t[0])} N`, `  Ty = ${fmt(t[1])} N`, `  Tz = ${fmt(t[2])} N`,
+    `  Thrust Magnitude = ${fmt(result.thrustMagnitude)} N`,
+    '',
+    `Distance from Earth = ${fmt(result.distanceEarth,3)} km`,
+    `Distance from Moon  = ${fmt(result.distanceMoon,3)} km`,
+    '',
+    `Optimization Success    = ${result.success}`,
+    `Within Thrust Limit      = ${result.withinThrustLimit}`,
+    `Iterations               = ${result.iterations}`,
+    `Residual Force Magnitude = ${result.residualMagnitude.toExponential(3)}`,
+  ];
+  document.getElementById('output').textContent = lines.join('\n');
+}
+
+function onPlot() {
+  if (!lastRun) { alert('Run the optimizer first.'); return; }
+  const inp = lastRun.inputs;
+  const orbitEci = orbitPath(inp.sma, inp.ecc, inp.inc, inp.raan, inp.argp);
+  const orbitRot = orbitEci.map(p => eciToRotating(p, EARTH_POS));
+  plotSystem(orbitRot, lastRun.result.position, lastRun.result.thrust);
+}
+
+function onExportCsv() {
+  if (!lastRun) { alert('Run the optimizer first.'); return; }
+  const inp = lastRun.inputs, r = lastRun.result;
+  const rows = [['Section','Field','Value']];
+  rows.push(['Input','Semi-major Axis (km)', inp.sma]);
+  rows.push(['Input','Eccentricity', inp.ecc]);
+  rows.push(['Input','Inclination (deg)', inp.inc]);
+  rows.push(['Input','RAAN (deg)', inp.raan]);
+  rows.push(['Input','Argument of Periapsis (deg)', inp.argp]);
+  rows.push(['Input','True Anomaly (deg)', inp.nu]);
+  rows.push(['Input','Mass (kg)', inp.mass]);
+  rows.push(['Input','Maximum Continuous Thrust (N)', inp.maxThrust]);
+  rows.push(['Input','Search Radius (km)', inp.searchRadius]);
+  rows.push(['Input','Optimization Tolerance', inp.tol]);
+  rows.push(['Input','Maximum Iterations', inp.maxIter]);
+  rows.push(['Output','Equilibrium x (km)', r.position[0]]);
+  rows.push(['Output','Equilibrium y (km)', r.position[1]]);
+  rows.push(['Output','Equilibrium z (km)', r.position[2]]);
+  rows.push(['Output','Thrust Tx (N)', r.thrust[0]]);
+  rows.push(['Output','Thrust Ty (N)', r.thrust[1]]);
+  rows.push(['Output','Thrust Tz (N)', r.thrust[2]]);
+  rows.push(['Output','Thrust Magnitude (N)', r.thrustMagnitude]);
+  rows.push(['Output','Distance from Earth (km)', r.distanceEarth]);
+  rows.push(['Output','Distance from Moon (km)', r.distanceMoon]);
+  rows.push(['Output','Optimization Success', r.success]);
+  rows.push(['Output','Within Thrust Limit', r.withinThrustLimit]);
+  rows.push(['Output','Iterations', r.iterations]);
+  rows.push(['Residual Error','Residual Force Magnitude', r.residualMagnitude]);
+
+  const csv = rows.map(row => row.join(',')).join('\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'cr3bp_equilibrium_results.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function onValidate() {
+  let mass=1000, tol=1e-10, maxIter=400;
+  try { const inp = readInputs(); mass=inp.mass; tol=inp.tol; maxIter=Math.max(inp.maxIter,300); } catch(e) {}
+
+  const results = validateAll(mass, 5000.0, tol, maxIter);
+  let html = '<fieldset><legend>Validation &mdash; Known Lagrange Points</legend><table>';
+  html += '<tr><th>Point</th><th>Known Position (km)</th><th>Computed Position (km)</th><th>Position Error (km)</th><th>Residual Error</th><th>Success</th></tr>';
+  for (const name of ['L1','L2','L3','L4','L5']) {
+    const r = results[name];
+    const k = r.known.map(v=>v.toFixed(1)).join(', ');
+    const c = r.computed.map(v=>v.toFixed(1)).join(', ');
+    html += `<tr><td>${name}</td><td>[${k}]</td><td>[${c}]</td><td>${r.posError.toExponential(3)}</td><td>${r.residual.toExponential(3)}</td><td>${r.success}</td></tr>`;
+  }
+  html += '</table></fieldset>';
+  document.getElementById('validateWrap').innerHTML = html;
+}
+
+document.getElementById('runBtn').addEventListener('click', onRun);
+document.getElementById('plotBtn').addEventListener('click', onPlot);
+document.getElementById('exportBtn').addEventListener('click', onExportCsv);
+document.getElementById('validateBtn').addEventListener('click', onValidate);
+</script>
+</body>
+</html>
